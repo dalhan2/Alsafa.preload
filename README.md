@@ -7,7 +7,7 @@ This repository contains **code only**. Downloaded streams, captions, chat logs,
 ## Contents
 
 - `SKILL.md` — the OpenCode skill definition ( portable paths via environment variables ).
-- `scripts/` — yt-dlp/ffmpeg-adjacent Python tools invoked by the skill.
+- `scripts/` — yt-dlp/ffmpeg-adjacent Python tools invoked by the skill. `whisper_lines.py` + `label_speakers.py` additionally label VOD transcript lines as game (NPC) dialogue or streamer speech by matching against a dialogue script built once per game from a no-commentary walkthrough (`pip install faster-whisper`), so final subtitles can omit game dialogue.
 - `capcutlib.py` + `subs.py` — vendored copies of the CapCut draft library and its one local dependency, used by `make_multi_clip_draft.py`.
 - `install-skill.ps1` — copies `SKILL.md` into the local OpenCode skills folder (copy-on-install).
 - `tests/` — offline unit tests with generated fixtures; no network access required.

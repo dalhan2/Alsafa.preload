@@ -48,7 +48,13 @@ python -m yt_dlp --write-auto-subs --sub-format json3 --skip-download -o "$Strea
 python -m yt_dlp --write-subs --sub-langs live_chat --skip-download -o "$StreamDir\%(id)s.%(ext)s" "<URL>"
 ```
 
-These produce `cc_<id>.en.json3` and `<id>.live_chat.json` (rename to `<id>.live_chat.live_chat.json` if the older doubled convention is needed). Also fetch VOD comments with `--write-comments --dump-single-json --skip-download` for the crowd-sourced timestamp table; a 429 on captions/comments is usually transient — retry.
+These produce `cc_<id>.en.json3` and `<id>.live_chat.json` (rename to `<id>.live_chat.live_chat.json` if the older doubled convention is needed). Also fetch VOD comments for the crowd-sourced timestamp table (writes `cjson_<id>.info.json` — `--dump-single-json` prints to stdout and never creates the file):
+
+```powershell
+python -m yt_dlp --skip-download --write-info-json --write-comments -o "$StreamDir\cjson_%(id)s.%(ext)s" "<URL>"
+```
+
+A 429 on captions/comments is usually transient — retry.
 
 Turn the comment dump into a readable digest with:
 
@@ -90,6 +96,23 @@ Now write the file **`transcript v2.md`** (exact name — the planning script lo
 - A short bottom-line summary naming the top cut targets.
 
 Times may be `M:SS` or `H:MM:SS`; ranges are supported. Every row in a `Time | Moment` table becomes a candidate clip.
+
+### Optional: game-dialogue filter (walkthrough match)
+
+Label each VOD transcript line as game (NPC) dialogue or streamer speech by matching it against the game's own dialogue script, then omit game lines from the final subtitles. One-time per game, build the script from a no-commentary walkthrough (audio-only pull of a 36 h walkthrough is ~750 MB; `--start/--end` cut just a mission window):
+
+```powershell
+python -m pip install faster-whisper
+python "$Repo\scripts\whisper_lines.py" "https://youtu.be/<walkthrough>" "$StreamDir\game_script_<game>.json" --lang en
+```
+
+Per stream, label the VOD lines (accepts the YouTube `cc_<id>.en.json3`, or a `whisper_lines.py` JSON of the VOD audio for when auto-subs are unusable — Japanese/Indonesian streams):
+
+```powershell
+python "$Repo\scripts\label_speakers.py" "$StreamDir\cc_<id>.en.json3" "$StreamDir\game_script_<game>.json" "$StreamDir\vod_labeled_<id>.json" --drop --srt "$StreamDir\streamer_<id>.srt"
+```
+
+Matched lines are game/NPC dialogue: omit them (with `--drop`) or style them separately. Unmatched lines are the streamer: never drop on no-match — open-world lines the walkthrough never triggered must stay visible. A streamer echoing an NPC line mislabels as game; fix rare cases by hand. If game and streamer speak different languages, whisper's per-line language is usually the speaker label on its own; the walkthrough match then just confirms it. When present, use the labeled transcript while writing `transcript v2.md`.
 
 ## 3. Cut clips and put them in a new CapCut folder
 
