@@ -39,8 +39,10 @@ Set two user environment variables (persisted for future sessions):
 Install or refresh the skill (copy-on-install):
 
 ```powershell
-.\install-skill.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-skill.ps1
 ```
+
+Add `-SetEnv` to also persist `PREPROCESS_REPO` (this checkout) and `PREPROCESS_ROOT` (its parent folder) as user environment variables. On machines where script execution is allowed, `.\install-skill.ps1` works directly.
 
 This copies `SKILL.md` to `$env:USERPROFILE\.config\opencode\skills\preprocess\SKILL.md`. The local copy is a generated artifact — edit the repo copy, then re-run the installer. Use `-SkillDir` to install somewhere else.
 
