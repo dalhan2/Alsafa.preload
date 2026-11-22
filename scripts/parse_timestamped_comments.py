@@ -23,7 +23,7 @@ title = info.get('title', '?')
 channel = info.get('channel') or info.get('uploader', '?')
 upload = (info.get('upload_date') or '?')
 if upload != '?' and len(upload) == 8:
-    upload = f"{upload[:4]}-{upload[4:6]}-{upload[6:]}]"
+    upload = f"{upload[:4]}-{upload[4:6]}-{upload[6:]}"
 dur = int(info.get('duration') or 0)
 length = str(timedelta(seconds=dur)) if dur else '?'
 url = info.get('webpage_url') or f"https://www.youtube.com/watch?v={info.get('id')}"

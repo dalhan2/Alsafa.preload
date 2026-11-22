@@ -123,11 +123,15 @@ def main():
         for (a_, b_), lab in zip(times, labels):
             groups.append({"a": a_, "b": b_, "labels": [lab], "explicit": b_ > a_})
 
-    # 3. script-only finds
+    # 3. script-only finds (read until the next heading, not just 3 lines)
     for i, line in enumerate(lines):
         if "Script-only finds" in line:
-            blob = " ".join(lines[i + 1: i + 4])
-            for t in TIME_RE.findall(blob):
+            blob = []
+            for ln in lines[i + 1:]:
+                if ln.startswith("#"):
+                    break
+                blob.append(ln)
+            for t in TIME_RE.findall(" ".join(blob)):
                 groups.append({"a": sec(t), "b": sec(t),
                                "labels": [f"script-only find {fmt(sec(t))}"],
                                "explicit": False})
