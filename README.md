@@ -19,10 +19,10 @@ This repository contains **code only**. Downloaded streams, captions, chat logs,
 - `ffmpeg` / `ffprobe` on `PATH`.
 - Optional, only for step 3: CapCut desktop, fully closed, with a draft named `template`.
 
-## Install
+## Install / refresh the skill (required to use it from OpenCode)
 
 ```powershell
-git clone https://github.com/<owner>/Alsafa.preload.git
+git clone https://github.com/dalhan2/Alsafa.preload.git
 cd Alsafa.preload
 python -m pip install -r requirements.txt
 ```
@@ -39,12 +39,22 @@ Set two user environment variables (persisted for future sessions):
 Install or refresh the skill (copy-on-install):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install-skill.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-skill.ps1 -SetEnv
 ```
 
-Add `-SetEnv` to also persist `PREPROCESS_REPO` (this checkout) and `PREPROCESS_ROOT` (its parent folder) as user environment variables. On machines where script execution is allowed, `.\install-skill.ps1` works directly.
+`-SetEnv` persists `PREPROCESS_REPO` (this checkout) and `PREPROCESS_ROOT` (its parent folder), so you can skip the manual `SetEnvironmentVariable` step above. On machines where script execution is allowed, `.\install-skill.ps1 -SetEnv` works directly. The `-ExecutionPolicy Bypass` form is needed on Windows machines that block unsigned scripts, like the original development machine.
 
-This copies `SKILL.md` to `$env:USERPROFILE\.config\opencode\skills\preprocess\SKILL.md`. The local copy is a generated artifact — edit the repo copy, then re-run the installer. Use `-SkillDir` to install somewhere else.
+The installer copies `SKILL.md` to `$env:USERPROFILE\.config\opencode\skills\preprocess\SKILL.md`. The local copy is a generated artifact — edit the repo copy, then re-run the installer to sync. Use `-SkillDir` to install somewhere else.
+
+### Who needs this?
+
+| Person | Needs the installer? |
+| --- | --- |
+| Using the repo through OpenCode | **Yes** — this is how OpenCode finds the skill |
+| Updating `SKILL.md` in the repo | **Yes** — re-run to refresh the local copy |
+| Just running the Python scripts directly | No — call `python scripts/...` yourself |
+
+You can skip this step entirely if you only want to run the scripts manually.
 
 ## Workflow
 
@@ -69,7 +79,7 @@ Tests use temporary synthetic JSON3/live-chat/Markdown fixtures and `plan_clips_
 After changing `SKILL.md` or any script:
 
 ```powershell
-.\install-skill.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-skill.ps1
 git add . && git commit -m "update preprocess tooling"
 git push
 ```
