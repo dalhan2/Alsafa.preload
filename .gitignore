@@ -1,0 +1,32 @@
+# Generated media / analysis artifacts
+streams/
+capcut/
+chunks/
+clips/
+done/
+*.mkv
+*.mp4
+*.webm
+*.json3
+*live_chat*.json
+*cutpoints_*.txt
+*major_breaks_*.txt
+transcript_*.txt
+transcript v2.md
+clips_plan.json
+chat_peaks_digest.txt
+vod_analyzer_validation.txt
+timestamped_comments_*.txt
+cjson_*.info.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv*/
+.pytest_cache/
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
