@@ -17,6 +17,10 @@ intentionally gitignored.
 
 - `SKILL.md` — the OpenCode skill definition (portable paths via environment variables).
 - `scripts/` — yt-dlp/ffmpeg-adjacent Python tools invoked by the skill.
+  `whisper_lines.py` + `label_speakers.py` additionally label VOD transcript
+  lines as game (NPC) dialogue or streamer speech by matching against a dialogue
+  script built once per game from a no-commentary walkthrough
+  (`pip install faster-whisper`), so final subtitles can omit game dialogue.
 - `capcutlib.py` + `subs.py` — the CapCut draft library and its local dependency.
 - `server.py` + `editor.py` + `render.py` + `catalogue.py/json` — the bundled
   CapCut MCP server (formerly the separate `capcut-mcp` project).

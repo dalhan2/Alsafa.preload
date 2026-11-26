@@ -118,6 +118,87 @@ CUT at 00:03:40   (silent 2.0s, a -> b)
             self.assertEqual(plan[1]['start'], 178)
             self.assertFalse(any('rejected' in ' '.join(c['labels']) for c in plan))
 
+    def test_plan_clips_v2_reads_all_script_only_finds_lines(self):
+        transcript = """# Stream
+
+### Script-only finds
+
+- 00:01:30 first find
+- 00:03:30 second find
+- 00:05:30 third find
+- 00:07:30 fourth find
+- 00:09:30 fifth find
+"""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            stream = d / 'saba_abc'
+            stream.mkdir()
+            (stream / 'transcript v2.md').write_text(transcript, encoding='utf-8')
+            out = d / 'clips_plan.json'
+
+            run_script('plan_clips_v2.py', stream, '--out', out, '--duration', '600')
+            plan = json.loads(out.read_text(encoding='utf-8'))
+
+            # all five finds become clips (the old code read only 3 lines)
+            self.assertEqual(len(plan), 5)
+            self.assertEqual([c['start'] for c in plan], [85, 205, 325, 445, 565])
+
+
+class LabelSpeakersTest(unittest.TestCase):
+    GAME = [
+        {"start": 0, "end": 2, "text": "Welcome to Vice City, kid."},
+        {"start": 10, "end": 12, "text": "Get in the car, we are leaving."},
+    ]
+
+    def _game_json(self, d):
+        p = d / 'game_script.json'
+        p.write_text(json.dumps(self.GAME), encoding='utf-8')
+        return p
+
+    def test_exact_fuzzy_and_streamer_lines(self):
+        vod = [
+            {"start": 5, "end": 7, "text": "Get in the car, we are leaving."},   # exact
+            {"start": 9, "end": 11, "text": "Welcome to Vice City, kim."},       # ASR drift
+            {"start": 12, "end": 14, "text": "That mission was insane, chat!"},   # streamer
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            vod_p = d / 'vod.json'
+            vod_p.write_text(json.dumps(vod), encoding='utf-8')
+            out = d / 'labeled.json'
+
+            run_script('label_speakers.py', vod_p, self._game_json(d), out)
+            rows = json.loads(out.read_text(encoding='utf-8'))
+
+            self.assertEqual([r['speaker'] for r in rows],
+                             ['game', 'game', 'streamer'])
+            self.assertEqual(rows[0]['game_text'],
+                             'Get in the car, we are leaving.')
+
+    def test_drop_and_srt_write_streamer_lines_only(self):
+        vod = {"events": [
+            {"tStartMs": 5000, "dDurMs": 2000,
+             "segs": [{"utf8": "Get in the car, we are leaving."}]},
+            {"tStartMs": 12000, "dDurMs": 2000,
+             "segs": [{"utf8": "That mission was insane, chat!"}]},
+        ]}
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            vod_p = d / 'cc_abc.en.json3'
+            vod_p.write_text(json.dumps(vod), encoding='utf-8')
+            out = d / 'labeled.json'
+            srt = d / 'streamer.srt'
+
+            run_script('label_speakers.py', vod_p, self._game_json(d), out,
+                       '--drop', '--srt', srt)
+            rows = json.loads(out.read_text(encoding='utf-8'))
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['speaker'], 'streamer')
+            srt_text = srt.read_text(encoding='utf-8')
+            self.assertIn('00:00:12,000 --> 00:00:14,000', srt_text)
+            self.assertIn('That mission was insane, chat!', srt_text)
+
 
 class VendoredLibTest(unittest.TestCase):
     def test_make_multi_clip_draft_imports_vendored_capcutlib(self):
