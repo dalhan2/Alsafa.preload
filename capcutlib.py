@@ -33,7 +33,9 @@ BACKUP_DIR = '.mcp_backups'
 # ---------------------------------------------------------------- basics
 
 def uid():
-    return uuid.uuid4().hex
+    # CapCut writes ids as uppercase dashed GUIDs; matching that keeps the
+    # draft consistent with everything the app itself creates.
+    return str(uuid.uuid4()).upper()
 
 
 def now_us():
@@ -78,6 +80,90 @@ def write_json(path, obj):
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(obj, f, ensure_ascii=False, separators=(',', ':'))
     os.replace(tmp, path)
+
+
+def blank_keyframes(seg):
+    """CapCut requires these arrays on every segment; omitting them crashes it."""
+    seg['common_keyframes'] = []
+    seg['keyframe_refs'] = []
+    return seg
+
+
+def sync_backup(path, obj):
+    """Keep draft_content.json.bak identical to the content we just wrote."""
+    bak = path + '.bak'
+    if os.path.isdir(os.path.dirname(bak)):
+        with open(bak, 'w', encoding='utf-8') as f:
+            json.dump(obj, f, ensure_ascii=False, separators=(',', ':'))
+
+
+def set_timeline_layout(folder, draft_id):
+    """Point timeline_layout.json at this draft's timeline id."""
+    path = os.path.join(folder, 'timeline_layout.json')
+    if not os.path.isfile(path):
+        return
+    try:
+        layout = read_json(path)
+    except Exception:
+        return
+    for item in layout.get('dockItems') or []:
+        if isinstance(item, dict):
+            item['timelineIds'] = [draft_id]
+            item['timelineNames'] = ['Timeline 01']
+    write_json(path, layout)
+
+
+SNAP_FPS = 30
+
+
+def snap_us(us, fps=SNAP_FPS):
+    """Snap a microsecond value to the nearest frame boundary.
+
+    CapCut lays out clips at a fixed fps: ranges between frames show on the
+    timeline but never render, so every range must land on the grid.
+    """
+    return int(round(round(us * fps / 1_000_000) * 1_000_000 / fps))
+
+
+def find_multi_clip_donor(root=None):
+    """Find a project CapCut itself built with a real per-clip material graph.
+
+    Cloning the one-clip template cannot express a multi-clip timeline; the
+    per-segment speed/placeholder/canvas/sound/vocal refs and the parallel
+    audio track only exist in a project CapCut created from many clips.
+    """
+    root = drafts_root(root)
+    explicit = os.environ.get('CAPCUT_DONOR')
+    best = None
+    names = ([explicit] if explicit and os.path.isdir(os.path.join(root, explicit))
+             else []) + (sorted(os.listdir(root)) if os.path.isdir(root) else [])
+    for name in names:
+        folder = name if os.path.isabs(name) else os.path.join(root, name)
+        if not os.path.isdir(folder):
+            continue
+        cp = content_path(folder)
+        if not cp:
+            continue
+        try:
+            content = read_json(cp)
+        except Exception:
+            continue
+        vtrack = find_track(content, 'video')
+        atrack = find_track(content, 'audio')
+        if not vtrack or not atrack:
+            continue
+        vsegs = vtrack.get('segments') or []
+        asegs = atrack.get('segments') or []
+        if len(vsegs) < 2 or len(asegs) < 2:
+            continue
+        # needs per-segment support refs (speed/canvas/...), not an empty list
+        if not all(s.get('extra_material_refs') for s in vsegs[:2]):
+            continue
+        score = min(len(vsegs), len(asegs))
+        if best is None or score > best['segments']:
+            best = {'folder': folder, 'name': os.path.basename(folder),
+                    'segments': score, 'content_path': cp, 'content': content}
+    return best
 
 
 def capcut_running():
@@ -296,7 +382,7 @@ def find_template(root=None):
             content = read_json(cp)
         except Exception:
             continue
-        if find_track(content, 'video') and find_track(content, 'text'):
+        if find_track(content, 'video'):
             meta_name = os.path.basename(folder)
             try:
                 meta = read_json(os.path.join(folder, 'draft_meta_info.json'))
@@ -305,6 +391,32 @@ def find_template(root=None):
                 pass
             return {'folder': folder, 'name': os.path.basename(folder),
                     'draft_name': meta_name, 'content_path': cp, 'content': content}
+    return None
+
+
+def find_text_donor(root=None):
+    """Find a text segment + material in any draft, to style captions/titles.
+
+    The one-clip template is allowed to have no text clip (CapCut 9.x projects
+    sometimes lose it). In that case any real draft's text style is a better
+    source than refusing to build.
+    """
+    for item in list_drafts(root):
+        folder = item['folder']
+        if not content_path(folder):
+            continue
+        try:
+            content = read_json(content_path(folder))
+        except Exception:
+            continue
+        for track in content.get('tracks') or []:
+            if track_type(track) != 'text' or not track.get('segments'):
+                continue
+            seg = track['segments'][0]
+            mat = find_material(content, seg.get('material_id'))
+            if mat:
+                return {'segment': deepcopy(seg), 'material': deepcopy(mat),
+                        'folder': folder, 'draft_name': item.get('draft_name')}
     return None
 
 
@@ -331,6 +443,9 @@ def validate(content, video_path=None):
             mid = seg.get('material_id')
             if mid and not find_material(content, mid):
                 errors.append(f'segment {sid} references missing material {mid}')
+            for key in ('common_keyframes', 'keyframe_refs'):
+                if not isinstance(seg.get(key), list):
+                    errors.append(f'segment {sid} needs a {key} array (CapCut crashes without it)')
         spans.sort()
         for i in range(1, len(spans)):
             if spans[i][0] < spans[i - 1][1] - 1000:
@@ -436,8 +551,7 @@ def make_clip_draft(name, video, start, end, subs=None, canvas='16:9',
         seg['source_timerange'] = {'start': in_us, 'duration': clip_us}
         if 'speed' in seg:
             seg['speed'] = 1.0
-        for key in ('common_keyframes', 'keyframe_refs'):
-            seg.pop(key, None)
+        blank_keyframes(seg)
         vtrack['segments'] = [seg]
 
         # 3. canvas + vertical fit
@@ -473,14 +587,63 @@ def make_clip_draft(name, video, start, end, subs=None, canvas='16:9',
 
         if cues or title:
             ttrack = find_track(content, 'text')
-            if not ttrack or not ttrack.get('segments'):
-                raise RuntimeError(
-                    'Template has no text clip. Add one text clip to the template '
-                    '(its font/position/style are reused for captions).')
-            tseg_tpl = ttrack['segments'][0]
-            tmat_tpl = find_material(content, tseg_tpl.get('material_id'))
+            tseg_tpl = tmat_tpl = None
+            if ttrack and ttrack.get('segments'):
+                tseg_tpl = ttrack['segments'][0]
+                tmat_tpl = find_material(content, tseg_tpl.get('material_id'))
             if not tmat_tpl:
-                raise RuntimeError('Template text clip has no material.')
+                donor = find_text_donor(root)
+                if donor:
+                    tseg_tpl = donor['segment']
+                    tmat_tpl = donor['material']
+            if not tmat_tpl:
+                tmat_tpl = {
+                    'id': uid(), 'type': 'text', 'name': '',
+                    'content': json.dumps({'text': 'TEXT', 'styles': [{
+                        'range': [0, 4], 'size': 9.0,
+                        'fill': {'content': {'render_type': 'solid',
+                                             'solid': {'color': [1, 1, 1]}}}}]}),
+                    'global_alpha': 1.0, 'line_spacing': 0.02,
+                    'has_shadow': False, 'text_color': '#FFFFFF',
+                    'text_alpha': 1.0, 'font_name': '', 'font_size': 7.0,
+                    'font_path': 'C:/Windows/Fonts/arial.ttf', 'font_id': '',
+                    'alignment': 1, 'line_feed': 1, 'is_rich_text': False,
+                    'underline': False, 'italic_degree': 0, 'bold_width': 0.0,
+                    'border_alpha': 1.0, 'border_color': '', 'border_width': 0.08,
+                    'background_color': '', 'background_alpha': 1.0,
+                    'background_style': 0, 'background_round_radius': 0.0,
+                    'background_width': 0.14, 'background_height': 0.14,
+                    'fixed_width': -1.0, 'fixed_height': -1.0,
+                    'line_max_width': 0.82, 'force_apply_line_max_width': False,
+                    'language': 'en-US', 'source_from': '',
+                    'current_words': {'start_time': [], 'end_time': [], 'text': []},
+                    'words': {'start_time': [], 'end_time': [], 'text': []},
+                }
+            if not tseg_tpl:
+                tseg_tpl = {
+                    'id': uid(), 'source_timerange': None,
+                    'target_timerange': {'start': 0, 'duration': 1_000_000},
+                    'render_timerange': {'start': 0, 'duration': 0}, 'desc': '',
+                    'state': 0, 'speed': 1.0, 'is_loop': False,
+                    'is_tone_modify': False, 'reverse': False,
+                    'intensifies_audio': False, 'cartoon': False, 'volume': 1.0,
+                    'last_nonzero_volume': 1.0,
+                    'clip': {'scale': {'x': 1.0, 'y': 1.0}, 'rotation': 0.0,
+                             'transform': {'x': 0.0, 'y': -0.7},
+                             'flip': {'vertical': False, 'horizontal': False},
+                             'alpha': 1.0},
+                    'uniform_scale': {'on': True, 'value': 1.0},
+                    'material_id': '', 'extra_material_refs': [],
+                    'render_index': 14000, 'keyframe_refs': [],
+                    'enable_lut': False, 'enable_adjust': False,
+                    'enable_hsl': False, 'visible': True, 'group_id': '',
+                    'track_render_index': 1, 'common_keyframes': [],
+                }
+            if ttrack is None:
+                ttrack = {'id': uid(), 'type': 'text', 'segments': [],
+                          'flag': 1, 'attribute': 0, 'name': 'text',
+                          'is_default_name': True}
+                content.setdefault('tracks', []).append(ttrack)
             ttrack['segments'] = []
 
             def add_text(track, text, at, length):
@@ -491,13 +654,13 @@ def make_clip_draft(name, video, start, end, subs=None, canvas='16:9',
                 tseg = deepcopy(tseg_tpl)
                 tseg['id'] = uid()
                 tseg['material_id'] = tmat['id']
+                tseg['extra_material_refs'] = []
                 tseg['target_timerange'] = {'start': int(at * 1e6),
                                             'duration': max(100_000, int(length * 1e6))}
                 if 'source_timerange' in tseg:
                     tseg['source_timerange'] = {'start': 0,
                                                 'duration': tseg['target_timerange']['duration']}
-                for key in ('common_keyframes', 'keyframe_refs'):
-                    tseg.pop(key, None)
+                blank_keyframes(tseg)
                 track['segments'].append(tseg)
 
             if title:
@@ -526,6 +689,8 @@ def make_clip_draft(name, video, start, end, subs=None, canvas='16:9',
         if errors:
             raise RuntimeError('draft validation failed: ' + '; '.join(errors[:8]))
         write_json(cp, content)
+        sync_backup(cp, content)
+        set_timeline_layout(dest, draft_id)
 
         # 6. meta
         meta_path = os.path.join(dest, 'draft_meta_info.json')
@@ -575,6 +740,282 @@ def make_clip_draft(name, video, start, end, subs=None, canvas='16:9',
         raise
 
 
+def make_multi_clip_draft(name, stream_dir, plan=None, video=None, canvas='16:9',
+                          root=None, clip_dir=None):
+    """Create one CapCut draft from a stream's clips_plan.json.
+
+    Built by cloning a *multi-clip* project that CapCut itself created, because
+    the one-clip template cannot express a many-clip timeline. Requirements
+    learned the hard way:
+
+      * each distinct file needs its own material id, and each segment must
+        point at its own material (otherwise every clip plays the first file);
+      * the donor's draft id / meta draft id / timeline layout must be kept --
+        regenerating them makes CapCut fail to bind the timeline, show clips
+        that never render, and rename the folder on quit;
+      * all ranges must land on the frame grid, or playback never starts;
+      * video and audio need parallel tracks.
+
+    clip_dir:   optional folder of pre-cut .mp4 clips to use directly (one
+                material per file). When omitted, one source video plus the
+                plan's ranges is used.
+
+    stream_dir: folder containing clips_plan.json and the source video.
+    plan:       optional explicit path to clips_plan.json.
+    video:      optional source video (default: largest .mkv/.mp4 in stream_dir).
+    """
+    root = drafts_root(root)
+    if capcut_running():
+        raise RuntimeError('CapCut is running. Close CapCut fully, then retry '
+                           '(it autosaves over agent-written drafts).')
+    name = str(name).strip()
+    if not name:
+        raise RuntimeError('draft name is required')
+    stream_dir = os.path.abspath(str(stream_dir))
+    if not os.path.isdir(stream_dir):
+        raise RuntimeError(f'stream folder not found: {stream_dir}')
+
+    # ---- collect (source_file, in_point_s, duration_s) triples
+    jobs = []
+    if clip_dir:
+        clip_dir = os.path.abspath(str(clip_dir))
+        files = sorted(p for p in (os.path.join(clip_dir, f) for f in os.listdir(clip_dir))
+                       if p.lower().endswith(('.mp4', '.mov', '.mkv')))
+        if not files:
+            raise RuntimeError(f'no clips in {clip_dir}')
+        for path in files:
+            info = ffprobe_media(path)
+            jobs.append((path, 0.0, float(info.get('duration') or 0), info))
+    else:
+        plan_path = (os.path.abspath(str(plan)) if plan
+                     else os.path.join(stream_dir, 'clips_plan.json'))
+        if not os.path.isfile(plan_path):
+            raise RuntimeError(f'clips plan not found: {plan_path}')
+        clips = read_json(plan_path)
+        if not isinstance(clips, list) or not clips:
+            raise RuntimeError('clips plan must be a non-empty JSON list')
+        if video:
+            video_path = os.path.abspath(str(video))
+        else:
+            cands = [e for e in os.scandir(stream_dir)
+                     if e.is_file() and e.name.lower().endswith(('.mkv', '.mp4'))]
+            if not cands:
+                raise RuntimeError(f'no .mkv/.mp4 source video in {stream_dir}')
+            video_path = max(cands, key=lambda e: e.stat().st_size).path
+        if not os.path.isfile(video_path):
+            raise RuntimeError(f'video not found: {video_path}')
+        src = ffprobe_media(video_path)
+        src_dur = float(src.get('duration') or 0)
+        for i, clip in enumerate(clips, 1):
+            if not isinstance(clip, dict):
+                raise RuntimeError(f'clip {i} is not an object')
+            try:
+                start = float(clip.get('start', 0))
+                if clip.get('duration') is not None:
+                    dur = float(clip['duration'])
+                elif clip.get('end') is not None:
+                    dur = float(clip['end']) - start
+                else:
+                    raise KeyError('duration')
+            except (TypeError, ValueError, KeyError):
+                raise RuntimeError(f'clip {i} needs numeric start + duration (or end)')
+            if start < 0 or dur <= 0:
+                raise RuntimeError(f'clip {i} has invalid range: start={start}, duration={dur}')
+            if src_dur and start + dur > src_dur + 0.5:
+                raise RuntimeError(f'clip {i} ends past the video '
+                                   f'({start + dur:.2f}s > {src_dur:.2f}s)')
+            jobs.append((video_path, start, dur, src))
+
+    donor = find_multi_clip_donor(root)
+    if not donor:
+        raise RuntimeError(
+            'No multi-clip donor project found. In CapCut, create one project with '
+            'several clips, save, clear its timeline to a few clips you keep, and '
+            'close CapCut. Set CAPCUT_DONOR=<folder> to point at it explicitly.')
+
+    base = re.sub(r'[^A-Za-z0-9._-]+', '_', name).strip('_')[:48] or 'clips'
+    folder_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{base}"
+    dest = os.path.join(root, folder_name)
+    n = 1
+    while os.path.exists(dest):
+        n += 1
+        dest = os.path.join(root, f'{folder_name}_{n}')
+    os.makedirs(root, exist_ok=True)
+    shutil.copytree(donor['folder'], dest)
+    shutil.rmtree(os.path.join(dest, BACKUP_DIR), ignore_errors=True)
+    for junk in ('draft.extra', 'mini_draft.json', 'template-2.tmp', '.locked'):
+        p = os.path.join(dest, junk)
+        if os.path.isfile(p):
+            os.remove(p)
+
+    try:
+        cp = content_path(dest)
+        content = read_json(cp)
+        mats = content.setdefault('materials', {})
+        vtrack = find_track(content, 'video')
+        atrack = find_track(content, 'audio')
+        if not vtrack or not atrack:
+            raise RuntimeError('donor has no video+audio track pair')
+        v_seg_tpl = vtrack['segments'][0]
+        a_seg_tpl = atrack['segments'][0]
+        v_mats = mats.get('videos') or []
+        a_mats = mats.get('audios') or []
+        if not v_mats or not a_mats:
+            raise RuntimeError('donor has no video/audio materials')
+        v_mat_tpl, a_mat_tpl = v_mats[0], a_mats[0]
+        v_refs = [s.get('extra_material_refs') or [] for s in vtrack['segments']]
+        a_refs = [s.get('extra_material_refs') or [] for s in atrack['segments']]
+
+        videos, audios, vsegs, asegs = [], [], [], []
+        acc = 0
+        for i, (path, start_s, dur_s, info) in enumerate(jobs):
+            raw = int(round(float(info.get('duration') or dur_s) * 1e6))
+            dur_us = snap_us(int(round(dur_s * 1e6)))
+            if dur_us <= 0:
+                raise RuntimeError(f'clip {i + 1} snaps to zero frames')
+            if raw and dur_us > raw:
+                dur_us -= int(round(1_000_000 / SNAP_FPS))
+            src_us = snap_us(int(round(start_s * 1e6)))
+
+            vmat = deepcopy(v_mat_tpl)
+            vmat['id'] = uid()
+            vmat['path'] = posix(path)
+            vmat['material_name'] = os.path.basename(path)
+            if 'duration' in vmat:
+                vmat['duration'] = raw or dur_us
+            if info.get('width') and 'width' in vmat:
+                vmat['width'] = info['width']
+            if info.get('height') and 'height' in vmat:
+                vmat['height'] = info['height']
+            if 'has_audio' in vmat:
+                vmat['has_audio'] = info.get('has_audio', True)
+            videos.append(vmat)
+
+            amat = deepcopy(a_mat_tpl)
+            amat['id'] = uid()
+            amat['path'] = posix(path)
+            if 'duration' in amat:
+                amat['duration'] = raw or dur_us
+            if 'material_name' in amat:
+                amat['material_name'] = os.path.basename(path)
+            audios.append(amat)
+
+            vs = deepcopy(v_seg_tpl)
+            vs['id'] = uid()
+            vs['material_id'] = vmat['id']
+            vs['source_timerange'] = {'start': src_us, 'duration': dur_us}
+            vs['target_timerange'] = {'start': acc, 'duration': dur_us}
+            vs['speed'] = 1.0
+            vs['volume'] = 1.0
+            vs['extra_material_refs'] = list(v_refs[i % len(v_refs)])
+            blank_keyframes(vs)
+            vsegs.append(vs)
+
+            asg = deepcopy(a_seg_tpl)
+            asg['id'] = uid()
+            asg['material_id'] = amat['id']
+            asg['source_timerange'] = {'start': src_us, 'duration': dur_us}
+            asg['target_timerange'] = {'start': acc, 'duration': dur_us}
+            asg['speed'] = 1.0
+            asg['extra_material_refs'] = list(a_refs[i % len(a_refs)])
+            blank_keyframes(asg)
+            asegs.append(asg)
+            acc += dur_us
+
+        mats['videos'] = videos
+        mats['audios'] = audios
+        vtrack['segments'] = vsegs
+        atrack['segments'] = asegs
+        content['tracks'] = [vtrack, atrack]
+
+        # canvas
+        vertical = str(canvas).replace(' ', '') in ('9:16', 'vertical', '1080x1920')
+        if vertical:
+            set_canvas(content, 1080, 1920)
+            for seg, (path, _s, _d, info) in zip(vsegs, jobs):
+                scale = 1080 / float(info.get('width') or 1920)
+                clip = seg.setdefault('clip', {})
+                clip['scale'] = {'x': scale, 'y': scale}
+                clip['transform'] = {'x': 0.0, 'y': 0.0}
+                if 'rotation' in clip:
+                    clip['rotation'] = 0.0
+        else:
+            set_canvas(content, 1920, 1080)
+        content['duration'] = snap_us(acc)
+        # deliberately keep the donor's content id / meta id / timeline layout
+
+        errors = validate(content, jobs[0][0])
+        if errors:
+            raise RuntimeError('draft validation failed: ' + '; '.join(errors[:8]))
+        write_json(cp, content)
+        sync_backup(cp, content)
+
+        meta_path = os.path.join(dest, 'draft_meta_info.json')
+        meta = read_json(meta_path) if os.path.isfile(meta_path) else {}
+        meta['draft_name'] = name
+        meta['tm_duration'] = content['duration']
+        meta['tm_draft_create'] = now_us()
+        meta['tm_draft_modified'] = now_us()
+        meta['draft_fold_path'] = posix(dest)
+        meta['draft_root_path'] = posix(root)
+        if 'draft_is_invisible' in meta:
+            meta['draft_is_invisible'] = False
+        proto = None
+        for group in meta.get('draft_materials') or []:
+            if isinstance(group, dict) and group.get('type') == 0 and group.get('value'):
+                proto = group['value'][0]
+                break
+        if proto is not None:
+            items = []
+            for path, _s, _d, info in jobs:
+                item = deepcopy(proto)
+                item.update({
+                    'create_time': now_us(),
+                    'duration': int(round(float(info.get('duration') or 0) * 1e6)),
+                    'file_Path': posix(path),
+                    'height': info.get('height') or 0,
+                    'material_name': os.path.basename(path),
+                    'metetype': 'video',
+                    'type': 0,
+                    'width': info.get('width') or 0,
+                })
+                items.append(item)
+            for group in meta.get('draft_materials') or []:
+                if isinstance(group, dict) and group.get('type') == 0:
+                    group['value'] = items
+        try:
+            cover = os.path.join(dest, 'draft_cover.jpg')
+            mid = jobs[0][1] + jobs[0][2] / 2.0
+            subprocess.run(['ffmpeg', '-y', '-v', 'error', '-ss', f'{mid:.3f}',
+                            '-i', jobs[0][0], '-frames:v', '1',
+                            '-vf', 'scale=480:-2', cover],
+                           capture_output=True, timeout=180)
+            if os.path.isfile(cover):
+                meta['draft_cover'] = posix(cover)
+        except Exception:
+            pass
+        write_json(meta_path, meta)
+
+        _register_root(root, donor, name, dest, content['duration'],
+                       meta.get('draft_id') or content.get('id') or donor['name'])
+
+        return {
+            'ok': True,
+            'draft_name': name,
+            'folder': dest,
+            'clips': len(jobs),
+            'segments': len(vsegs),
+            'audio_segments': len(asegs),
+            'duration_sec': round(content['duration'] / 1e6, 2),
+            'canvas': '1080x1920' if vertical else '1920x1080',
+            'donor': donor['name'],
+            'next': 'Open CapCut, the draft appears in the project list; polish and Export.',
+        }
+    except Exception:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+
+
 def _register_media(meta, video, probe):
     """Best-effort: mirror the video into draft_meta_info's draft_materials."""
     groups = meta.get('draft_materials')
@@ -604,6 +1045,10 @@ def _register_media(meta, video, probe):
         if template_item is not None:
             item = deepcopy(template_item)
             item.update({k: v for k, v in entry.items() if v not in (None, '')})
+            # replace the template's own video entry: appending would leave a
+            # stale source (the template's clip) in the media pool
+            group['value'] = [v for v in group['value']
+                              if v is not template_item]
             group['value'].append(item)
             return
     # no video group found: append a standard one
@@ -623,19 +1068,28 @@ def _register_root(root, tpl, name, dest, duration_us, draft_id):
         if not isinstance(entry, dict):
             continue
         fold = posix(entry.get('draft_fold_path', '')).rstrip('/')
-        if fold.endswith(tpl['name']) or entry.get('draft_name') == tpl.get('draft_name'):
+        if fold.lower().endswith(str(tpl['name']).lower()) or \
+                entry.get('draft_name') == tpl.get('draft_name'):
             template_entry = entry
             break
     new_entry = deepcopy(template_entry) if template_entry else {}
+    cover = os.path.join(dest, 'draft_cover.jpg')
     new_entry.update({
         'draft_name': name,
         'draft_fold_path': posix(dest),
+        'draft_json_file': posix(os.path.join(dest, 'draft_content.json')),
+        'draft_root_path': posix(root),
+        'draft_cover': posix(cover) if os.path.isfile(cover) else '',
         'tm_duration': duration_us,
         'tm_draft_create': now_us(),
         'tm_draft_modified': now_us(),
     })
-    if 'draft_id' in new_entry:
+    if draft_id:
         new_entry['draft_id'] = draft_id
+    new_entry.setdefault('draft_is_invisible', False)
+    new_entry.setdefault('cloud_draft_cover', False)
+    new_entry.setdefault('cloud_draft_sync', False)
+    new_entry.setdefault('tm_draft_removed', 0)
     entries.append(new_entry)
     try:
         root_meta['draft_ids'] = max(int(root_meta.get('draft_ids') or 0), len(entries))
@@ -743,19 +1197,29 @@ def import_subs_into_draft(name, subs, subs_offset=0.0, replace=True, root=None)
     cp = content_path(folder)
     content = read_json(cp)
     text_tracks = [t for t in content.get('tracks') or []
-                   if track_type(t) == 'text' and t.get('segments')]
-    if not text_tracks:
-        text_tracks = [t for t in content.get('tracks') or [] if track_type(t) == 'text']
-    if not text_tracks:
-        raise RuntimeError('Draft has no text clip to clone caption styling from.')
-    # the caption track is the text track with the most cues (title tracks have 1)
-    ttrack = max(text_tracks, key=lambda t: len(t.get('segments') or []))
-    if not ttrack.get('segments'):
-        raise RuntimeError('Draft has no text clip to clone caption styling from.')
-    tseg_tpl = ttrack['segments'][0]
-    tmat_tpl = find_material(content, tseg_tpl.get('material_id'))
-    if not tmat_tpl:
-        raise RuntimeError('Draft text track has no text material.')
+                   if track_type(t) == 'text']
+    ttrack = None
+    if text_tracks:
+        # the caption track is the text track with the most cues (title tracks have 1)
+        ttrack = max(text_tracks, key=lambda t: len(t.get('segments') or []))
+    tseg_tpl = tmat_tpl = None
+    if ttrack and ttrack.get('segments'):
+        tseg_tpl = ttrack['segments'][0]
+        tmat_tpl = find_material(content, tseg_tpl.get('material_id'))
+    if not tseg_tpl or not tmat_tpl:
+        # Multi-clip drafts start with an empty text track; borrow any real
+        # draft's text segment/style so captions can still be imported.
+        donor = find_text_donor(root)
+        if donor:
+            tseg_tpl = donor['segment']
+            tmat_tpl = donor['material']
+        if not tmat_tpl:
+            raise RuntimeError('Draft has no text clip to clone caption styling from.')
+        if ttrack is None:
+            ttrack = {'id': uid(), 'type': 'text', 'segments': [],
+                      'flag': 1, 'attribute': 0, 'name': 'text',
+                      'is_default_name': True}
+            content.setdefault('tracks', []).append(ttrack)
 
     duration_s = (content.get('duration') or 0) / 1e6
     cues = parse_subs(subs)
@@ -782,14 +1246,14 @@ def import_subs_into_draft(name, subs, subs_offset=0.0, replace=True, root=None)
         tseg = deepcopy(tseg_tpl)
         tseg['id'] = uid()
         tseg['material_id'] = tmat['id']
+        tseg['extra_material_refs'] = []
         tseg['target_timerange'] = {
             'start': int(cue['start'] * 1e6),
             'duration': max(100_000, int((cue['end'] - cue['start']) * 1e6))}
         if 'source_timerange' in tseg:
             tseg['source_timerange'] = {'start': 0,
                                         'duration': tseg['target_timerange']['duration']}
-        for key in ('common_keyframes', 'keyframe_refs'):
-            tseg.pop(key, None)
+        blank_keyframes(tseg)
         ttrack['segments'].append(tseg)
 
     _prune_unused(content)
@@ -803,6 +1267,7 @@ def import_subs_into_draft(name, subs, subs_offset=0.0, replace=True, root=None)
     if errors:
         raise RuntimeError('draft validation failed: ' + '; '.join(errors[:8]))
     write_json(cp, content)
+    sync_backup(cp, content)
 
     meta_path = os.path.join(folder, 'draft_meta_info.json')
     if os.path.isfile(meta_path):
@@ -823,6 +1288,9 @@ def doctor(root=None):
     except Exception:
         pass
     drafts = list_drafts(root)
+    tpl_text = find_track(tpl['content'], 'text') if tpl else None
+    text_donor = None if (tpl_text and tpl_text.get('segments')) else find_text_donor(root)
+    captions_ready = bool(tpl_text and tpl_text.get('segments')) or bool(text_donor)
     return {
         'drafts_root': root,
         'drafts_root_exists': os.path.isdir(root),
@@ -830,10 +1298,18 @@ def doctor(root=None):
         'capcut_installed': capcut_version(),
         'capcut_running': capcut_running(),
         'template_ready': bool(tpl),
+        'captions_ready': captions_ready,
+        'caption_style_source': (
+            'template' if (tpl_text and tpl_text.get('segments')) else
+            (text_donor['draft_name'] if text_donor else None)),
         'template': ({'draft_name': tpl['draft_name'], 'folder': tpl['folder']}
                      if tpl else None),
         'bootstrap': None if tpl else (
-            "Create a CapCut project named 'template': add any video clip and one "
-            "text clip (position/style it where captions should appear), save, close CapCut."),
+            "Create a CapCut project named 'template': add any video clip, save, "
+            "and close CapCut. Add one text clip too if you want a specific caption style."),
+        'caption_bootstrap': None if captions_ready else (
+            "No text clip was found in any draft. Add one text clip to the "
+            "'template' project (position/style it where captions should appear), "
+            "save, and close CapCut."),
         'drafts': drafts,
     }

@@ -19,6 +19,12 @@ vod_analyzer_validation.txt
 timestamped_comments_*.txt
 cjson_*.info.json
 
+# CapCut MCP runtime state
+.mcp_backups/
+.mcp_trash/
+.capcut_mcp_media.json
+backups/
+
 # Python
 __pycache__/
 *.py[cod]

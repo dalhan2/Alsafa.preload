@@ -126,14 +126,37 @@ This reads `transcript v2.md` plus the first `cutpoints_*.txt`, probes the large
 
 Create a **new folder** for this stream's CapCut clips (e.g. `Join-Path $Root "capcut\<streamer>_<id>"`), then cut the physical clips there from the original with `ffmpeg -c copy` (stream copy — no re-encode) using the start/end values in `clips_plan.json`. Do not re-download any source material for this.
 
-If building an actual CapCut draft, use the existing script (CapCut must be fully closed):
+If building an actual CapCut draft, use the bundled builder (CapCut must be fully closed):
 
 ```powershell
 python "$Repo\scripts\make_multi_clip_draft.py" $StreamDir --name "<draft name>"
 ```
 
-It uses the vendored `capcutlib.py` at the repo root and clones the `template` draft, laying out one segment per plan entry.
+Optional: `--canvas 9:16`, `--video <path>`, `--plan <path>`, or
+`--clip-dir <folder>` (one material per pre-cut file).
+
+The script is a thin wrapper around `capcutlib.make_multi_clip_draft` — the same
+builder the bundled CapCut MCP server uses. It clones a real **multi-clip donor**
+project (two or more clips with audio, created by CapCut itself), not the
+one-clip `template`, and lays out one segment per plan entry (or per file with
+`--clip-dir`). Set `CAPCUT_DONOR` to a folder name to pick the donor explicitly.
+
+## 4. Finish the cut with the CapCut MCP server
+
+This repository also ships the full CapCut MCP server (`$Repo\server.py`). When
+it is registered in OpenCode (see `README.md`, `CAPCUT_MCP.md`), the tools appear
+as `capcut_<name>` and edit the draft the builder just created:
+
+1. `capcut_project_open` / `capcut_timeline_read` — confirm tracks, clips and captions.
+2. `capcut_captions_add`, `capcut_title_add`, `capcut_clip_update` — captions, titles, fades, transforms.
+3. `capcut_keyframe_set`, `capcut_clip_masks`, `capcut_effect_layer_add` — zooms, masks, effects.
+4. `capcut_preview_frame` — inspect a frame without opening CapCut.
+5. `capcut_project_save`, then `capcut_export_start` / `capcut_export_wait` — render a review MP4.
+
+CapCut must stay fully closed while the MCP writes drafts; its autosave would
+overwrite agent edits. Open CapCut after `project_save` only when you want to
+polish by hand.
 
 ## Done criteria
 
-Report back with: the downloaded MKV path and size, the `transcript v2.md` path, the number of clips and total clip duration, and the CapCut folder/draft path. Confirm video streams are 1920x1080 60 fps with audio.
+Report back with: the downloaded MKV path and size, the `transcript v2.md` path, the number of clips and total clip duration, and the CapCut folder/draft path. If the MCP finished the edit, include the export path too. Confirm video streams are 1920x1080 60 fps with audio.
